@@ -1,63 +1,66 @@
 let c = document.querySelector("canvas");
 let ctx = c.getContext("2d");
-const size = { w: 1600, h: 900 };
-const maxParticles = 200000;
-const maxSpeed = 15;
-const spawn = 300;
-const partSize = 2;
-const baseMinRange =15;
-const incr = 0.00002;
-let minRange = baseMinRange;
-let trou_noir;
-let mode = false;
-let mass = 0;
-let baseForce = 15;
-let totalMass = 1; // Add this to track total absorbed mass
-let mouseIsPressed = false;
-let mouseX, mouseY;
-let lastTime = 0;
-let deltaTime = 0;
-let MIN_RANGE_SQ;
 
-// Use TypedArrays for better performance with large datasets
+// Configuration constants - minimal memory footprint
+const CONFIG = Object.freeze({
+  size: { w: 1600, h: 900 },
+  maxParticles: 200000,
+  maxSpeed: 15,
+  spawnRate: 100,
+  partSize: 2,
+  baseMinRange: 15,
+  massIncrement: 0.0002,
+  blackHoleCount: 3,
+  blackHoleMaxSpeed: 10,
+  maxCenterForce: 1,
+  baseForce: 5,
+});
+
+// Pre-calculated device pixel ratio
+const dpr = window.devicePixelRatio || 1;
+
+// High-performance typed arrays with less overhead
 const particleData = {
-  x: new Float32Array(maxParticles),
-  y: new Float32Array(maxParticles),
-  vx: new Float32Array(maxParticles),
-  vy: new Float32Array(maxParticles),
-  prevX: new Float32Array(maxParticles),
-  prevY: new Float32Array(maxParticles),
-  active: new Uint8Array(maxParticles),
+  x: new Float32Array(CONFIG.maxParticles),
+  y: new Float32Array(CONFIG.maxParticles),
+  vx: new Float32Array(CONFIG.maxParticles),
+  vy: new Float32Array(CONFIG.maxParticles),
+  prevX: new Float32Array(CONFIG.maxParticles),
+  prevY: new Float32Array(CONFIG.maxParticles),
+  active: new Uint8Array(CONFIG.maxParticles),
 };
 
+// State variables - use const for unchanging references
 let activeCount = 0;
+let mouseIsPressed = false;
+let mouseX = 0,
+  mouseY = 0;
+let lastTime = 0,
+  deltaTime = 0;
+const black_holes = [];
 
-// Initialize canvas with device pixel ratio for better performance
-const dpr = window.devicePixelRatio || 1;
-c.width = window.innerWidth * dpr;
-c.height = window.innerHeight * dpr;
-c.style.width = window.innerWidth + "px";
-c.style.height = window.innerHeight + "px";
-ctx.scale(dpr, dpr);
-c.tabIndex = 1;
-c.style.outline = "none";
+// Optimized canvas setup with less DOM manipulation
+function setupCanvas() {
+  const width = window.innerWidth * dpr;
+  const height = window.innerHeight * dpr;
 
-// Pre-calculate values
-let halfWidth = c.width / 2;
-let halfHeight = c.height / 2;
-trou_noir = { x: halfWidth, y: halfHeight };
+  c.width = width;
+  c.height = height;
 
-// Optimized updateMinRange function
-function updateMinRange() {
- // minRange = baseMinRange * (1 + Math.log10(totalMass/1.002)); // Scale with total mass
-  MIN_RANGE_SQ = minRange * minRange;
-  return minRange;
+  Object.assign(c.style, {
+    width: `${window.innerWidth}px`,
+    height: `${window.innerHeight}px`,
+    outline: "none",
+  });
+
+  ctx.scale(dpr, dpr);
+  c.tabIndex = 1;
 }
 
-// Optimized line-circle intersection
+// Inlined and simplified intersection check
 function checkLineCircleIntersection(p1x, p1y, p2x, p2y, cx, cy, rSquared) {
-  const dx = p2x - p1x;
-  const dy = p2y - p1y;
+  const dx = p2x - p1x,
+    dy = p2y - p1y;
   const a = dx * dx + dy * dy;
 
   if (a === 0) return false;
@@ -70,34 +73,36 @@ function checkLineCircleIntersection(p1x, p1y, p2x, p2y, cx, cy, rSquared) {
     p1y * p1y -
     2 * (cx * p1x + cy * p1y) -
     rSquared;
-  const bb4ac = b * b - 4 * a * c;
 
-  return bb4ac >= 0;
+  return b * b - 4 * a * c >= 0;
 }
 
-// Modified particle creation with slight spread
+// Particle creation with reduced random calls
 function addParticle(x, y) {
-  if (activeCount >= maxParticles) return null;
+  if (activeCount >= CONFIG.maxParticles) return null;
 
   const index = activeCount++;
-  // Add a small random offset for more natural spawning
-  const spread = 2;
-  particleData.x[index] = x + (Math.random() * 2 - 1) * spread;
-  particleData.y[index] = y + (Math.random() * 2 - 1) * spread;
+  const spreadX = Math.random() * 4 - 2;
+  const spreadY = Math.random() * 4 - 2;
+  const velX = Math.random() * 4 - 2;
+  const velY = Math.random() * 4 - 2;
+
+  particleData.x[index] = x + spreadX;
+  particleData.y[index] = y + spreadY;
   particleData.prevX[index] = particleData.x[index];
   particleData.prevY[index] = particleData.y[index];
-  particleData.vx[index] = (Math.random() * 2 - 1) * 3;
-  particleData.vy[index] = (Math.random() * 2 - 1) * 3;
+  particleData.vx[index] = velX;
+  particleData.vy[index] = velY;
   particleData.active[index] = 1;
 
   return index;
 }
 
-// Optimized particle recycling
-function recycleParticle(index) {
+// Faster particle recycling
+function recycleParticle(index, bh) {
   const lastIndex = --activeCount;
+
   if (index !== lastIndex && lastIndex > 0) {
-    // Swap with last active particle
     particleData.x[index] = particleData.x[lastIndex];
     particleData.y[index] = particleData.y[lastIndex];
     particleData.vx[index] = particleData.vx[lastIndex];
@@ -106,104 +111,143 @@ function recycleParticle(index) {
     particleData.prevY[index] = particleData.prevY[lastIndex];
     particleData.active[index] = particleData.active[lastIndex];
   }
-  // Increment total mass when particle is absorbed
-  totalMass += incr; // Adjust this value to control how quickly the black hole grows
+
+  if (bh) bh.totalMass += CONFIG.massIncrement;
 }
 
-// Batch rendering using path2D
-function batchRenderParticles() {
-  const path = new Path2D();
-  for (let i = 0; i < activeCount; i++) {
-    path.moveTo(particleData.x[i], particleData.y[i]);
-    path.lineTo(particleData.prevX[i], particleData.prevY[i]);
-  }
-  ctx.stroke(path);
-}
-
-// Main draw loop with optimized rendering
+// Optimized draw and update function
 function draw(timestamp) {
   deltaTime = Math.min((timestamp - lastTime) / 16.67, 2);
   lastTime = timestamp;
 
-  // Clear screen with alpha for trail effect
-  ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+  // Trail effect with less alpha for cleaner look
+  ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
   ctx.fillRect(0, 0, c.width, c.height);
 
-  // Update minRange
-  updateMinRange();
-
-  // Prepare batch rendering
   ctx.strokeStyle = "white";
-  ctx.lineWidth = 0.075;
+  ctx.lineWidth = 0.1;
   ctx.beginPath();
 
-  // Update particles in bulk
+  let empty = true;
+  black_holes.forEach((bh, a) => {
+    if (!bh.dead) {
+      bh.minRange = CONFIG.baseMinRange * (1 + Math.log10(bh.totalMass) / 3);
+      bh.MIN_RANGE_SQ = bh.minRange * bh.minRange;
+
+      let i = 0;
+      while (i < activeCount) {
+        if (bh.isBlackHole) {
+          particleData.prevX[i] = particleData.x[i];
+          particleData.prevY[i] = particleData.y[i];
+
+          const dx = bh.pos.x - particleData.x[i];
+          const dy = bh.pos.y - particleData.y[i];
+          const distSq = dx * dx + dy * dy;
+
+          if (distSq <= bh.MIN_RANGE_SQ) {
+            recycleParticle(i, bh);
+            bh.mass++;
+            continue;
+          }
+
+          const dist = Math.sqrt(distSq);
+          const forceMagnitude = (bh.baseForce * bh.totalMass * 100) / distSq;
+          const scale = forceMagnitude / dist;
+
+          particleData.vx[i] = Math.max(
+            -CONFIG.maxSpeed,
+            Math.min(CONFIG.maxSpeed, particleData.vx[i] + dx * scale)
+          );
+          particleData.vy[i] = Math.max(
+            -CONFIG.maxSpeed,
+            Math.min(CONFIG.maxSpeed, particleData.vy[i] + dy * scale)
+          );
+
+          if (
+            checkLineCircleIntersection(
+              particleData.prevX[i],
+              particleData.prevY[i],
+              particleData.x[i],
+              particleData.y[i],
+              bh.x,
+              bh.y,
+              bh.MIN_RANGE_SQ
+            )
+          ) {
+            recycleParticle(i, bh);
+            continue;
+          }
+        } else {
+          const dx = bh.pos.x - particleData.x[i];
+          const dy = bh.pos.y - particleData.y[i];
+          const distSq = dx * dx + dy * dy;
+          const dist = Math.sqrt(distSq);
+
+          if (dist >= 1000) recycleParticle(i, false);
+        }
+        i++;
+      }
+
+      // Black hole interactions
+      black_holes.forEach((other, b) => {
+        if (a !== b && other.isBlackHole) {
+          const bh_dx = bh.pos.x - other.pos.x;
+          const bh_dy = bh.pos.y - other.pos.y;
+          let bh_distSq = bh_dx * bh_dx + bh_dy * bh_dy;
+
+          bh_distSq = Math.max(bh_distSq, bh.MIN_RANGE_SQ);
+          const bh_dist = Math.sqrt(bh_distSq);
+
+          if (bh_dist > 1500 && !bh.isBlackHole) {
+            other.dead = true;
+          }
+
+          const bh_forceMagnitude = bh.isBlackHole
+            ? (bh.baseForce * other.baseForce) / bh_distSq
+            : (bh.baseForce *
+                bh.totalMass *
+                other.totalMass *
+                other.baseForce) /
+              (Math.max(1, Math.abs(800 - bh_dist)) * 1500);
+
+          let bh_scale = bh_forceMagnitude / bh_dist;
+
+          if (!bh.isBlackHole && bh_scale > CONFIG.maxCenterForce) {
+            bh_scale = CONFIG.maxCenterForce;
+          }
+
+          other.vel.x = Math.max(
+            -CONFIG.blackHoleMaxSpeed,
+            Math.min(CONFIG.blackHoleMaxSpeed, other.vel.x + bh_dx * bh_scale)
+          );
+          other.vel.y = Math.max(
+            -CONFIG.blackHoleMaxSpeed,
+            Math.min(CONFIG.blackHoleMaxSpeed, other.vel.y + bh_dy * bh_scale)
+          );
+
+          other.pos.x += other.vel.x;
+          other.pos.y += other.vel.y;
+        }
+      });
+      empty = false;
+    }
+  });
+
   let i = 0;
   while (i < activeCount) {
-    particleData.prevX[i] = particleData.x[i];
-    particleData.prevY[i] = particleData.y[i];
-
-    const dx = trou_noir.x - particleData.x[i];
-    const dy = trou_noir.y - particleData.y[i];
-    const distSq = dx * dx + dy * dy;
-
-    if (distSq <= MIN_RANGE_SQ) {
-      recycleParticle(i);
-      mass++;
-      continue;
-    }
-
-    const dist = Math.sqrt(distSq);
-    // Modified force calculation incorporating total mass
-    const forceMagnitude = (baseForce * totalMass * 100) / distSq;
-    const scale = forceMagnitude / dist;
-
-    particleData.vx[i] += dx * scale;
-    particleData.vy[i] += dy * scale;
-
-    // Clamp velocities
-    particleData.vx[i] = Math.max(
-      -maxSpeed,
-      Math.min(maxSpeed, particleData.vx[i])
-    );
-    particleData.vy[i] = Math.max(
-      -maxSpeed,
-      Math.min(maxSpeed, particleData.vy[i])
-    );
-
     particleData.x[i] += particleData.vx[i];
     particleData.y[i] += particleData.vy[i];
-
-    // Check bounds and intersection in one pass
-    if (
-      particleData.x[i] > c.width * 1.2 ||
-      particleData.x[i] < -c.width * 0.2 ||
-      particleData.y[i] > c.height * 1.12 ||
-      particleData.y[i] < -c.height * 0.2 ||
-      checkLineCircleIntersection(
-        particleData.prevX[i],
-        particleData.prevY[i],
-        particleData.x[i],
-        particleData.y[i],
-        trou_noir.x,
-        trou_noir.y,
-        MIN_RANGE_SQ
-      )
-    ) {
-      recycleParticle(i);
-      continue;
-    }
-
     ctx.moveTo(particleData.x[i], particleData.y[i]);
     ctx.lineTo(particleData.prevX[i], particleData.prevY[i]);
     i++;
   }
 
-  // Batch render all particles
+  if (empty) addBlackHoles();
+
   ctx.stroke();
 
   if (mouseIsPressed) {
-    for (let n = 0; n < spawn; n++) {
+    for (let n = 0; n < CONFIG.spawnRate; n++) {
       addParticle(mouseX, mouseY);
     }
   }
@@ -211,31 +255,63 @@ function draw(timestamp) {
   requestAnimationFrame(draw);
 }
 
-c.addEventListener("mousedown", (e) => {
-  mouseIsPressed = true;
-  // Get correct mouse position relative to canvas
-  const rect = c.getBoundingClientRect();
-  mouseX = e.clientX - rect.left;
-  mouseY = e.clientY - rect.top;
-  c.focus();
-});
+// Simplified black hole generation
+function addBlackHoles() {
+  const center = {
+    pos: { x: c.width / dpr / 2, y: c.height / dpr / 2 },
+    baseForce: CONFIG.baseForce * 5,
+    minRange: CONFIG.baseMinRange,
+    mass: 0,
+    totalMass: 1,
+    isBlackHole: false,
+    vel: { x: 0, y: 0 },
+  };
 
-c.addEventListener("mouseup", () => (mouseIsPressed = false));
+  black_holes.push(center);
 
-c.addEventListener("keydown", (e) => {
-  if (e.code === "Space") {
-    mode = !mode;
-    if (mode) {
-      trou_noir = { x: mouseX, y: mouseY };
-    }
+  for (let a = 1; a <= CONFIG.blackHoleCount; a++) {
+    black_holes.push({
+      pos: {
+        x: (Math.random() * c.width) / dpr,
+        y: (Math.random() * c.height) / dpr,
+      },
+      vel: {
+        x: Math.random() * 0.5 - 0.25,
+        y: Math.random() * 0.5 - 0.25,
+      },
+      baseForce: CONFIG.baseForce,
+      minRange: CONFIG.baseMinRange,
+      mass: 0,
+      totalMass: 1,
+      isBlackHole: true,
+    });
   }
-});
+}
 
-c.addEventListener("mousemove", (e) => {
-  // Get correct mouse position relative to canvas
-  const rect = c.getBoundingClientRect();
-  mouseX = e.clientX - rect.left;
-  mouseY = e.clientY - rect.top;
-});
+// Event listener consolidation
+function setupEventListeners() {
+  const updateMousePosition = (e) => {
+    const rect = c.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+  };
 
-requestAnimationFrame(draw);
+  c.addEventListener("mousedown", (e) => {
+    mouseIsPressed = true;
+    updateMousePosition(e);
+    c.focus();
+  });
+
+  c.addEventListener("mouseup", () => (mouseIsPressed = false));
+  c.addEventListener("mousemove", updateMousePosition);
+}
+
+// Consolidated initialization
+function init() {
+  setupCanvas();
+  addBlackHoles();
+  setupEventListeners();
+  requestAnimationFrame(draw);
+}
+
+init();
